@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@openapitools/openapi-generator-cli": "^2.7.0",
+    "postman-to-openapi": "^3.0.1"
+  }
+}
