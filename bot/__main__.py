@@ -1,6 +1,7 @@
 from typing import Tuple
 import certifi
 import os
+import base64
 
 from telegram import Update, User
 from telegram import ReplyKeyboardMarkup, KeyboardButton, PhotoSize, Location
@@ -35,21 +36,45 @@ configuration = Configuration(
 )
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def identify_images(
+    context: ContextTypes.DEFAULT_TYPE,
+    photos: list[Tuple[PhotoSize, ...]],
+    location: Location = None,
+) -> None:
+    logging.debug(
+        f"\nIdentify images:\n{pformat(photos, indent=2)}\n{pformat(location, indent=2)})\n"
+    )
+
+    images = []
+    for photo in photos:
+        largest_photo = photo[-1]
+        file = await context.bot.get_file(largest_photo.file_id)
+        logging.info(f"\nAppend file: {pformat(file, indent=2)}\n")
+        bytes = await file.download_as_bytearray()
+        images.append(base64.b64encode(bytes).decode("ascii"))
+
+    (lattitude, longitude) = (
+        (None, None)
+        if not location
+        else (
+            location.latitude,
+            location.longitude,
+        )
+    )
+
+    async with ApiClient(configuration) as api_client:
+        api_client.set_default_header("Content-Type", "application/json")
+        api_client.set_default_header("Api-Key", PLANT_ID_API_KEY)
+        api = PlantIdApi(api_client)
+        body = {"images": images, "latitude": lattitude, "longitude": longitude}
+        # logging.info(f"\nRequest body:\n{pformat(body, indent=2)}\n")
+        resp = await api.identification_post(body=body)
+        logging.info(f"\nResponse:\n{pformat(resp, indent=2)}\n")
+
+
+async def start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     user: User = update.message.from_user
-    logging.info(f"from_user:\n{pformat(user, indent=2)}")
-    user_info = {
-        "id": user.id,
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "username": user.username,
-        "language_code": user.language_code,
-    }
-
-    logging.info(f"job_queue: {pformat(context.job_queue, indent=2)}")
-
-    formatted_user_info = json.dumps(user_info, indent=2)
-    response_text = f"User Info:\n```\n{formatted_user_info}\n```"
+    logging.debug(f"from_user:\n{pformat(user, indent=2)}")
 
     location_keyboard = [
         [
@@ -61,10 +86,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         location_keyboard,
         resize_keyboard=True,
         one_time_keyboard=True,
-    )
-
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id, text=response_text, parse_mode="Markdown"
     )
 
     await update.message.reply_text(
@@ -100,20 +121,11 @@ async def handle_location(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     #     )
 
 
-async def identify_images(photos: Tuple[PhotoSize, ...], location: Location = None):
-    logging.info(
-        f"\nIdentify images:\n{pformat(photos, indent=2)}\n{pformat(location, indent=2)})\n"
-    )
-    async with ApiClient(configuration) as api_client:
-        api_client.set_default_header("Content-Type", "application/json")
-        api_client.set_default_header("Api-Key", PLANT_ID_API_KEY)
-        api = PlantIdApi(api_client)
-
-
 async def batch_group(context: ContextTypes.DEFAULT_TYPE) -> None:
     global media_groups, chat_locations
     logging.debug(f"Batch group: {context.job.data}")
     await identify_images(
+        context,
         media_groups[context.job.data],
         location=chat_locations.get(context.job.chat_id, None),
     )
@@ -147,6 +159,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         else:
             logging.debug(f"Single photo")
             await identify_images(
+                context,
                 [update.message.photo],
                 location=chat_locations.get(update.effective_chat.id, None),
             )
