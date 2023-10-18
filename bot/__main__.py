@@ -1,17 +1,30 @@
-from typing import Tuple
+from typing import Tuple, Dict, List
 import certifi
 import os
 import base64
 
+import asyncio
+
 from telegram import Update, User
-from telegram import ReplyKeyboardMarkup, KeyboardButton, PhotoSize, Location
+from telegram import (
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    PhotoSize,
+    Location,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     ContextTypes,
 )
 from telegram.ext import filters
+
+from motor.core import AgnosticClient as MotorAgnosticClient
+from motor.motor_asyncio import AsyncIOMotorClient
 
 from aioplantid_sdk import Configuration, ApiClient, DefaultApi as PlantIdApi
 
@@ -26,21 +39,20 @@ logging.basicConfig(
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PLANT_ID_API_KEY = os.getenv("PLANT_ID_API_KEY")
+MONGODB_URL = os.getenv("MONGODB_URL")
 
 GALLERY_TIMEOUT = 1
-media_groups = {}
-chat_locations = {}
-configuration = Configuration(
-    host="https://plant.id/api/v3",
-    ssl_ca_cert=certifi.where(),
-)
+
+media_groups: Dict[str, List] = {}
+album_message_ids: Dict[str, int] = {}
+chat_locations: Dict[int, Location] = {}
 
 
 async def identify_images(
     context: ContextTypes.DEFAULT_TYPE,
     photos: list[Tuple[PhotoSize, ...]],
     location: Location = None,
-) -> None:
+) -> dict | None:
     logging.debug(
         f"\nIdentify images:\n{pformat(photos, indent=2)}\n{pformat(location, indent=2)})\n"
     )
@@ -62,14 +74,50 @@ async def identify_images(
         )
     )
 
-    async with ApiClient(configuration) as api_client:
+    async with ApiClient(
+        Configuration(
+            host="https://plant.id/api/v3",
+            ssl_ca_cert=certifi.where(),
+        )
+    ) as api_client:
         api_client.set_default_header("Content-Type", "application/json")
         api_client.set_default_header("Api-Key", PLANT_ID_API_KEY)
         api = PlantIdApi(api_client)
         body = {"images": images, "latitude": lattitude, "longitude": longitude}
-        # logging.info(f"\nRequest body:\n{pformat(body, indent=2)}\n")
-        resp = await api.identification_post(body=body)
-        logging.info(f"\nResponse:\n{pformat(resp, indent=2)}\n")
+        plant_id = await api.create_identification(
+            details=",".join(
+                [
+                    "common_names",
+                    "url",
+                    #     "description",
+                    #     "taxonomy",
+                    #     "rank",
+                    #     "gbif_id",
+                    #     "inaturalist_id",
+                    #     "image",
+                    #     "synonyms",
+                    #     "edible_parts",
+                    #     "watering",
+                    #     "propagation_methods",
+                ]
+            ),
+            language=",".join(["en", "ru", "ua"]),
+            body=body,
+        )
+        logging.info(f"Identification access token: {plant_id['access_token']}")
+
+        if isinstance(plant_id, dict):
+            identification = {
+                **plant_id,
+                "namespace": "plant.id",
+            }
+            client = context.bot_data["db_client"]
+            db = client["aurea_flamma"]
+            identifications = db["identifications"]
+            await identifications.insert_one(identification)
+            return identification
+        else:
+            return None
 
 
 async def start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -102,12 +150,12 @@ async def handle_location(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         logging.info(
             f"Received location:\n{pformat(update.message.location, indent=2)}"
         )
-        latitude = update.message.location.latitude
-        longitude = update.message.location.longitude
         chat_locations[update.effective_chat.id] = update.message.location
-        await update.message.reply_text(
-            f"Received location: Latitude {latitude}, Longitude {longitude}"
-        )
+        # latitude = update.message.location.latitude
+        # longitude = update.message.location.longitude
+        # await update.message.reply_text(
+        #     f"Received location: Latitude {latitude}, Longitude {longitude}"
+        # )
     elif update.message.text == "No Location":
         # Handle refusal to send location
         chat_locations[update.effective_chat.id] = None
@@ -121,15 +169,39 @@ async def handle_location(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     #     )
 
 
-async def batch_group(context: ContextTypes.DEFAULT_TYPE) -> None:
-    global media_groups, chat_locations
+async def batch_group_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    global media_groups, chat_locations, album_message_ids
     logging.debug(f"Batch group: {context.job.data}")
-    await identify_images(
+    identification = await identify_images(
         context,
         media_groups[context.job.data],
         location=chat_locations.get(context.job.chat_id, None),
     )
+    if isinstance(identification, dict):
+        base_suggestion = identification["result"]["classification"]["suggestions"][0]
+        text = (
+            f"{round(base_suggestion['probability']*100)}% {base_suggestion['name']}\n"
+            f"see also:"
+        )
+        keyboard = []
+        for lang in ("global", "en", "ru", "ua"):
+            if isinstance(base_suggestion["details"]["url"][lang], str):
+                keyboard.append(
+                    InlineKeyboardButton(
+                        lang, url=base_suggestion["details"]["url"][lang]
+                    )
+                )
+        reply_markup = InlineKeyboardMarkup([keyboard])
+        await context.bot.send_message(
+            chat_id=context.job.chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            # parse_mode="MarkdownV2",
+            reply_to_message_id=album_message_ids[context.job.data],
+            # disable_web_page_preview=True,
+        )
     media_groups[context.job.data] = None
+    album_message_ids[context.job.data] = None
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -140,9 +212,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if update.message.media_group_id:
             group_id = update.message.media_group_id
             chat_id = update.effective_chat.id
+            message_id = update.message.message_id
             logging.debug(f"Media group: {group_id}")
             if group_id not in media_groups:
                 media_groups[group_id] = []
+                album_message_ids[group_id] = message_id
             media_groups[group_id].append(update.message.photo)
             job_name = f"gal:{chat_id}"
             jobs = context.job_queue.get_jobs_by_name(job_name)
@@ -150,7 +224,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 for job in jobs:
                     job.schedule_removal()
             context.job_queue.run_once(
-                batch_group,
+                batch_group_job,
                 GALLERY_TIMEOUT,
                 name=job_name,
                 chat_id=chat_id,
@@ -165,8 +239,45 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
 
 
+async def post_init(application: Application) -> None:
+    client = AsyncIOMotorClient(MONGODB_URL)
+    application.bot_data["db_client"] = client
+    db = client["aurea_flamma"]
+    collection_names = await db.list_collection_names()
+    if "identifications" not in collection_names:
+        await db.create_collection("identifications")
+    identifications = db["identifications"]
+
+    identifications_indices = [
+        ("namespace", False),
+        ("access_token", True),
+        ("completed", False),
+        ("created", False),
+        ("status", False),
+        ("result.classification.suggestions.details.entity_id", False),
+        ("result.classification.suggestions.details.language", False),
+        ("result.classification.suggestions.id", False),
+        ("result.classification.suggestions.name", False),
+        ("result.classification.suggestions.probability", False),
+        ("result.is_plant.probability", False),
+    ]
+
+    for index, unique in identifications_indices:
+        await identifications.create_index(index, unique=unique)
+
+
+async def post_shutdown(application: Application) -> None:
+    application.bot_data["db_client"].close()
+
+
 if __name__ == "__main__":
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    application = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(
