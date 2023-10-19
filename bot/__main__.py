@@ -4,6 +4,9 @@ import os
 import base64
 
 import asyncio
+import contextvars
+from fastapi import FastAPI
+from uvicorn import Config, Server
 
 from telegram import Update, User
 from telegram import (
@@ -29,8 +32,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from aioplantid_sdk import Configuration, ApiClient, DefaultApi as PlantIdApi
 
 import logging
-import json
-from pprint import pformat
+from pprint import pformat, pprint
 
 
 logging.basicConfig(
@@ -46,6 +48,15 @@ GALLERY_TIMEOUT = 1
 media_groups: Dict[str, List] = {}
 album_message_ids: Dict[str, int] = {}
 chat_locations: Dict[int, Location] = {}
+
+app = FastAPI()
+cx_bot = contextvars.ContextVar("bot")
+
+
+@app.get("/")
+async def read_root():
+    bot = cx_bot.get()
+    return {"Hello": "World"}
 
 
 async def identify_images(
@@ -264,6 +275,16 @@ async def post_init(application: Application) -> None:
 
     for index, unique in identifications_indices:
         await identifications.create_index(index, unique=unique)
+
+    async def start_server() -> None:
+        # asyncio.set_event_loop(asyncio.new_event_loop())
+        # asyncio.get_event_loop().run_until_complete(server.serve())
+        config = Config(app=app, host="0.0.0.0", port=5000, loop="asyncio")
+        server = Server(config)
+        await server.serve()
+
+    cx_bot.set(application.bot)
+    asyncio.create_task(start_server())
 
 
 async def post_shutdown(application: Application) -> None:
