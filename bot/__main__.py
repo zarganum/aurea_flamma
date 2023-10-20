@@ -1,12 +1,9 @@
 from typing import Tuple, Dict, List
+
 import certifi
 import os
 import base64
-
-import asyncio
-import contextvars
-from fastapi import FastAPI
-from uvicorn import Config, Server
+from datetime import datetime, timezone
 
 from telegram import Update, User
 from telegram import (
@@ -28,6 +25,7 @@ from telegram.ext import filters
 
 from motor.core import AgnosticClient as MotorAgnosticClient
 from motor.motor_asyncio import AsyncIOMotorClient
+import pymongo
 
 from aioplantid_sdk import Configuration, ApiClient, DefaultApi as PlantIdApi
 
@@ -39,34 +37,85 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PLANT_ID_API_KEY = os.getenv("PLANT_ID_API_KEY")
 MONGODB_URL = os.getenv("MONGODB_URL")
+MONGODB_NAME = "aurea_flamma"
 
 GALLERY_TIMEOUT = 1
 
-media_groups: Dict[str, List] = {}
+media_groups: Dict[str, list[Tuple[PhotoSize, ...]]] = {}
 album_message_ids: Dict[str, int] = {}
 chat_locations: Dict[int, Location] = {}
 
-app = FastAPI()
-cx_bot = contextvars.ContextVar("bot")
+
+async def db_init(client: AsyncIOMotorClient) -> None:
+    db = client[MONGODB_NAME]
+    collection_names = await db.list_collection_names()
+
+    if "identifications" not in collection_names:
+        await db.create_collection("identifications")
+    identifications = db["identifications"]
+
+    identifications_indices = [
+        ([("namespace", pymongo.ASCENDING), ("access_token", pymongo.ASCENDING)], True),
+        ("completed", False),
+        ("created", False),
+        ("status", False),
+        ("result.classification.suggestions.details.entity_id", False),
+        ("result.classification.suggestions.details.language", False),
+        ("result.classification.suggestions.id", False),
+        ("result.classification.suggestions.name", False),
+        ("result.classification.suggestions.probability", False),
+        ("result.is_plant.probability", False),
+    ]
+
+    for index, unique in identifications_indices:
+        await identifications.create_index(index, unique=unique)
+
+    if "users" not in collection_names:
+        await db.create_collection("users")
+    users = db["users"]
+
+    users_indexes = [
+        ([("namespace", pymongo.ASCENDING), ("id", pymongo.ASCENDING)], True),
+        ("created_at", False),
+        ("updated_at", False),
+    ]
+
+    for index, unique in users_indexes:
+        await users.create_index(index, unique=unique)
 
 
-@app.get("/")
-async def read_root():
-    bot = cx_bot.get()
-    return {"Hello": "World"}
+async def upsert_user(client: AsyncIOMotorClient, user_id: int) -> None:
+    users = client[MONGODB_NAME]["users"]
+    now = datetime.now().astimezone(timezone.utc)
+    await users.update_one(
+        {"_id": user_id},
+        {
+            "$setOnInsert": {
+                "_id": user_id,
+                "created_at": now,
+                "count": {"identifications": 0},
+            },
+            "$set": {"updated_at": now},
+        },
+        upsert=True,
+    )
 
 
 async def identify_images(
     context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
     photos: list[Tuple[PhotoSize, ...]],
     location: Location = None,
 ) -> dict | None:
     logging.debug(
         f"\nIdentify images:\n{pformat(photos, indent=2)}\n{pformat(location, indent=2)})\n"
     )
+
+    await upsert_user(client=context.bot_data["db_client"], user_id=user_id)
 
     images = []
     for photo in photos:
@@ -118,15 +167,27 @@ async def identify_images(
         logging.info(f"Identification access token: {plant_id['access_token']}")
 
         if isinstance(plant_id, dict):
-            identification = {
-                **plant_id,
-                "namespace": "plant.id",
-            }
-            client = context.bot_data["db_client"]
-            db = client["aurea_flamma"]
-            identifications = db["identifications"]
-            await identifications.insert_one(identification)
-            return identification
+            client: AsyncIOMotorClient = context.bot_data["db_client"]
+            async with await client.start_session() as session:
+                async with session.start_transaction():
+                    identification = {
+                        "namespace": "plant.id",
+                        "user_id": user_id,
+                        **plant_id,
+                    }
+                    await client[MONGODB_NAME].identifications.insert_one(
+                        identification
+                    )
+                    await client[MONGODB_NAME].users.update_one(
+                        {"_id": user_id},
+                        {
+                            "$set": {
+                                "updated_at": datetime.now().astimezone(timezone.utc)
+                            }
+                        },
+                        {"$inc": {"count.identifications": 1}},
+                    )
+                    return identification
         else:
             return None
 
@@ -185,7 +246,8 @@ async def batch_group_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     logging.debug(f"Batch group: {context.job.data}")
     identification = await identify_images(
         context,
-        media_groups[context.job.data],
+        user_id=context.job.user_id,
+        photos=media_groups[context.job.data],
         location=chat_locations.get(context.job.chat_id, None),
     )
     if isinstance(identification, dict):
@@ -239,55 +301,26 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 GALLERY_TIMEOUT,
                 name=job_name,
                 chat_id=chat_id,
+                user_id=update.effective_user.id,
                 data=group_id,
             )
         else:
             logging.debug(f"Single photo")
             await identify_images(
-                context,
-                [update.message.photo],
+                context=context,
+                user_id=update.effective_user.id,
+                photos=[update.message.photo],
                 location=chat_locations.get(update.effective_chat.id, None),
             )
 
 
-async def post_init(application: Application) -> None:
+async def app_post_init(application: Application) -> None:
     client = AsyncIOMotorClient(MONGODB_URL)
     application.bot_data["db_client"] = client
-    db = client["aurea_flamma"]
-    collection_names = await db.list_collection_names()
-    if "identifications" not in collection_names:
-        await db.create_collection("identifications")
-    identifications = db["identifications"]
-
-    identifications_indices = [
-        ("namespace", False),
-        ("access_token", True),
-        ("completed", False),
-        ("created", False),
-        ("status", False),
-        ("result.classification.suggestions.details.entity_id", False),
-        ("result.classification.suggestions.details.language", False),
-        ("result.classification.suggestions.id", False),
-        ("result.classification.suggestions.name", False),
-        ("result.classification.suggestions.probability", False),
-        ("result.is_plant.probability", False),
-    ]
-
-    for index, unique in identifications_indices:
-        await identifications.create_index(index, unique=unique)
-
-    async def start_server() -> None:
-        # asyncio.set_event_loop(asyncio.new_event_loop())
-        # asyncio.get_event_loop().run_until_complete(server.serve())
-        config = Config(app=app, host="0.0.0.0", port=5000, loop="asyncio")
-        server = Server(config)
-        await server.serve()
-
-    cx_bot.set(application.bot)
-    asyncio.create_task(start_server())
+    await db_init(client)
 
 
-async def post_shutdown(application: Application) -> None:
+async def app_post_shutdown(application: Application) -> None:
     application.bot_data["db_client"].close()
 
 
@@ -295,8 +328,8 @@ if __name__ == "__main__":
     application = (
         ApplicationBuilder()
         .token(TELEGRAM_BOT_TOKEN)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
+        .post_init(app_post_init)
+        .post_shutdown(app_post_shutdown)
         .build()
     )
 
