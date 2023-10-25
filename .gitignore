@@ -1,4 +1,15 @@
+.DS_Store
+
 .env
-node_modules/
+
 api/sdk/
 __pycache__/
+
+.eslintcache
+*.tsbuildinfo
+next-env.d.ts
+.npm
+node_modules/
+.next
+.vercel
+package-lock.json
