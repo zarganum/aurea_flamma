@@ -1,9 +1,8 @@
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict
 
 import certifi
 import os
 import base64
-from datetime import datetime, timezone
 
 from telegram import Update, User
 from telegram import (
@@ -23,15 +22,14 @@ from telegram.ext import (
 )
 from telegram.ext import filters
 
-from motor.core import AgnosticClient as MotorAgnosticClient
 from motor.motor_asyncio import AsyncIOMotorClient
-import pymongo
 
 from aioplantid_sdk import Configuration, ApiClient, DefaultApi as PlantIdApi
 
 import logging
 from pprint import pformat, pprint
 
+from db import ops as dbops
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -41,7 +39,6 @@ logging.basicConfig(
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PLANT_ID_API_KEY = os.getenv("PLANT_ID_API_KEY")
 MONGODB_URL = os.getenv("MONGODB_URL")
-MONGODB_NAME = "aurea_flamma"
 
 GALLERY_TIMEOUT = 1
 
@@ -50,72 +47,18 @@ album_message_ids: Dict[str, int] = {}
 chat_locations: Dict[int, Location] = {}
 
 
-async def db_init(client: AsyncIOMotorClient) -> None:
-    db = client[MONGODB_NAME]
-    collection_names = await db.list_collection_names()
-
-    if "identifications" not in collection_names:
-        await db.create_collection("identifications")
-    identifications = db["identifications"]
-
-    identifications_indices = [
-        ([("namespace", pymongo.ASCENDING), ("access_token", pymongo.ASCENDING)], True),
-        ("completed", False),
-        ("created", False),
-        ("status", False),
-        ("result.classification.suggestions.details.entity_id", False),
-        ("result.classification.suggestions.details.language", False),
-        ("result.classification.suggestions.id", False),
-        ("result.classification.suggestions.name", False),
-        ("result.classification.suggestions.probability", False),
-        ("result.is_plant.probability", False),
-    ]
-
-    for index, unique in identifications_indices:
-        await identifications.create_index(index, unique=unique)
-
-    if "users" not in collection_names:
-        await db.create_collection("users")
-    users = db["users"]
-
-    users_indexes = [
-        ([("namespace", pymongo.ASCENDING), ("id", pymongo.ASCENDING)], True),
-        ("created_at", False),
-        ("updated_at", False),
-    ]
-
-    for index, unique in users_indexes:
-        await users.create_index(index, unique=unique)
-
-
-async def upsert_user(client: AsyncIOMotorClient, user_id: int) -> None:
-    users = client[MONGODB_NAME]["users"]
-    now = datetime.now().astimezone(timezone.utc)
-    await users.update_one(
-        {"_id": user_id},
-        {
-            "$setOnInsert": {
-                "_id": user_id,
-                "created_at": now,
-                "count": {"identifications": 0},
-            },
-            "$set": {"updated_at": now},
-        },
-        upsert=True,
-    )
-
-
 async def identify_images(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
     photos: list[Tuple[PhotoSize, ...]],
     location: Location = None,
+    message_id: int = None,
 ) -> dict | None:
     logging.debug(
         f"\nIdentify images:\n{pformat(photos, indent=2)}\n{pformat(location, indent=2)})\n"
     )
 
-    await upsert_user(client=context.bot_data["db_client"], user_id=user_id)
+    await dbops.upsert_user(client=context.bot_data["db_client"], user_id=user_id)
 
     images = []
     for photo in photos:
@@ -125,7 +68,7 @@ async def identify_images(
         bytes = await file.download_as_bytearray()
         images.append(base64.b64encode(bytes).decode("ascii"))
 
-    (lattitude, longitude) = (
+    (latitude, longitude) = (
         (None, None)
         if not location
         else (
@@ -143,7 +86,7 @@ async def identify_images(
         api_client.set_default_header("Content-Type", "application/json")
         api_client.set_default_header("Api-Key", PLANT_ID_API_KEY)
         api = PlantIdApi(api_client)
-        body = {"images": images, "latitude": lattitude, "longitude": longitude}
+        body = {"images": images, "latitude": latitude, "longitude": longitude}
         plant_id = await api.create_identification(
             details=",".join(
                 [
@@ -167,27 +110,15 @@ async def identify_images(
         logging.info(f"Identification access token: {plant_id['access_token']}")
 
         if isinstance(plant_id, dict):
-            client: AsyncIOMotorClient = context.bot_data["db_client"]
-            async with await client.start_session() as session:
-                async with session.start_transaction():
-                    identification = {
-                        "namespace": "plant.id",
-                        "user_id": user_id,
-                        **plant_id,
-                    }
-                    await client[MONGODB_NAME].identifications.insert_one(
-                        identification
-                    )
-                    await client[MONGODB_NAME].users.update_one(
-                        {"_id": user_id},
-                        {
-                            "$set": {
-                                "updated_at": datetime.now().astimezone(timezone.utc)
-                            }
-                        },
-                        {"$inc": {"count.identifications": 1}},
-                    )
-                    return identification
+            return dbops.add_identification(
+                client=context.bot_data["db_client"],
+                plant_id={
+                    "namespace": "plant.id",
+                    "user_id": user_id,
+                    "reference": {"message_id": message_id},
+                    **plant_id,
+                },
+            )
         else:
             return None
 
@@ -244,14 +175,15 @@ async def handle_location(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 async def batch_group_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     global media_groups, chat_locations, album_message_ids
     logging.debug(f"Batch group: {context.job.data}")
-    identification = await identify_images(
+    plant_id = await identify_images(
         context,
         user_id=context.job.user_id,
         photos=media_groups[context.job.data],
         location=chat_locations.get(context.job.chat_id, None),
+        message_id=album_message_ids[context.job.data],
     )
-    if isinstance(identification, dict):
-        base_suggestion = identification["result"]["classification"]["suggestions"][0]
+    if isinstance(plant_id, dict):
+        base_suggestion = plant_id["result"]["classification"]["suggestions"][0]
         text = (
             f"{round(base_suggestion['probability']*100)}% {base_suggestion['name']}\n"
             f"see also:"
@@ -311,13 +243,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 user_id=update.effective_user.id,
                 photos=[update.message.photo],
                 location=chat_locations.get(update.effective_chat.id, None),
+                message_id=update.message.message_id,
             )
 
 
 async def app_post_init(application: Application) -> None:
     client = AsyncIOMotorClient(MONGODB_URL)
     application.bot_data["db_client"] = client
-    await db_init(client)
+    await dbops.init(client)
 
 
 async def app_post_shutdown(application: Application) -> None:
