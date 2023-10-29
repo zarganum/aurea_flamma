@@ -83,6 +83,9 @@ async def add_identification(
             await client.get_default_database().identifications.insert_one(plant_id)
             await client.get_default_database().users.update_one(
                 {"namespace": "tg", "id": plant_id["user_id"]},
-                {"$set": {"updated_at": datetime.now().astimezone(timezone.utc)}},
-                {"$inc": {"count.identifications": 1}},
+                {
+                    "$set": {"updated_at": datetime.now().astimezone(timezone.utc)},
+                    "$inc": {"count.identifications": 1},
+                },
             )
+            return plant_id

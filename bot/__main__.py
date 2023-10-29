@@ -110,7 +110,7 @@ async def identify_images(
         logging.info(f"Identification access token: {plant_id['access_token']}")
 
         if isinstance(plant_id, dict):
-            return dbops.add_identification(
+            return await dbops.add_identification(
                 client=context.bot_data["db_client"],
                 plant_id={
                     "namespace": "plant.id",
@@ -182,6 +182,7 @@ async def batch_group_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         location=chat_locations.get(context.job.chat_id, None),
         message_id=album_message_ids[context.job.data],
     )
+    logging.debug(f"Identification:\n{pformat(plant_id, indent=2)}")
     if isinstance(plant_id, dict):
         base_suggestion = plant_id["result"]["classification"]["suggestions"][0]
         text = (
