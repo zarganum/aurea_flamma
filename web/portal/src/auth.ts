@@ -2,8 +2,8 @@ import type { NextAuthOptions as NextAuthConfig } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import { objectToAuthDataMap, AuthDataValidator } from "@telegram-auth/server";
 
-import mongoose from "mongoose";
-import { connect, User } from "@/app/api/auth/[...nextauth]/db";
+import { ObjectId } from "mongodb";
+import clientPromise from "@/app/api/auth/[...nextauth]/db";
 import { JWT } from "next-auth/jwt/types";
 
 declare module "next-auth" {
@@ -73,25 +73,17 @@ export const config = {
 	session: { strategy: "jwt" },
 	callbacks: {
 		async jwt({ token, user, account, profile }) {
-			const conn = await connect();
-			const UserModel =
-				mongoose.models.User ||
-				conn.model<User>(
-					"User",
-					new mongoose.Schema(
-						{
-							_id: Number,
-							count: { identifications: Number },
-							created_at: Date,
-							updated_at: Date,
-						},
-						{ collection: "users" }
-					)
-				);
-			const dbUser = await UserModel.findOne({ _id: Number(token.sub) })
-				.lean()
-				.exec();
-			console.debug("callbacks.jwt dbUser", dbUser);
+			try {
+				const user_id = parseInt(token.sub || "0", 10);
+				const client = await clientPromise;
+				const db = client.db();
+				const dbUser = await db
+					.collection("users")
+					.findOne({ tg_id: user_id });
+				console.debug("callbacks.jwt dbUser", dbUser);
+			} catch (error) {
+				console.error("callbacks.jwt error", error);
+			}
 			console.debug("callbacks.jwt token", token);
 			return token;
 		},
