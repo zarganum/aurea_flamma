@@ -79,8 +79,11 @@ export const config = {
 				const db = client.db();
 				const dbUser = await db
 					.collection("users")
-					.findOne({ tg_id: user_id });
+					.findOne({ namespace: "tg", id: user_id });
 				console.debug("callbacks.jwt dbUser", dbUser);
+				if (dbUser) {
+					token.claims = dbUser.portal_claims;
+				}
 			} catch (error) {
 				console.error("callbacks.jwt error", error);
 			}
