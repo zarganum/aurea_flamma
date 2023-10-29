@@ -12,4 +12,5 @@ next-env.d.ts
 node_modules/
 .next
 .vercel
+# remove me
 package-lock.json
