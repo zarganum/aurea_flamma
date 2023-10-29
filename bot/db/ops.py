@@ -4,11 +4,9 @@ from pymongo import IndexModel, ASCENDING, DESCENDING
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
-MONGODB_NAME = "aurea_flamma"
-
 
 async def init(client: AsyncIOMotorClient) -> None:
-    db = client[MONGODB_NAME]
+    db = client.get_default_database()
     collection_names = await db.list_collection_names()
 
     if "identifications" not in collection_names:
@@ -58,13 +56,14 @@ async def init(client: AsyncIOMotorClient) -> None:
 
 
 async def upsert_user(client: AsyncIOMotorClient, user_id: int) -> None:
-    users = client[MONGODB_NAME]["users"]
+    users = client.get_default_database()["users"]
     now = datetime.now().astimezone(timezone.utc)
     await users.update_one(
-        {"_id": user_id},
+        {"namespace": "tg", "id": user_id},
         {
             "$setOnInsert": {
-                "_id": user_id,
+                "namespace": "tg",
+                "id": user_id,
                 "created_at": now,
                 "count": {"identifications": 0},
             },
@@ -81,9 +80,9 @@ async def add_identification(
         return None
     async with await client.start_session() as session:
         async with session.start_transaction():
-            await client[MONGODB_NAME].identifications.insert_one(plant_id)
-            await client[MONGODB_NAME].users.update_one(
-                {"_id": plant_id["user_id"]},
+            await client.get_default_database().identifications.insert_one(plant_id)
+            await client.get_default_database().users.update_one(
+                {"namespace": "tg", "id": plant_id["user_id"]},
                 {"$set": {"updated_at": datetime.now().astimezone(timezone.utc)}},
                 {"$inc": {"count.identifications": 1}},
             )
