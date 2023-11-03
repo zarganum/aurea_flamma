@@ -1,0 +1,8 @@
+{
+  "additionalProperties": {
+    "library": "asyncio",
+    "packageName": "aioplantid_sdk",
+    "packageVersion": "3.0.0"
+  },
+  "files": {}
+}

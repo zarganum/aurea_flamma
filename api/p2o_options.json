@@ -1,0 +1,11 @@
+{
+  "info": {
+    "version": "3.0.0"
+  },
+  "pathDepth": 2,
+  "operationId": "auto",
+  "disabledParams": {
+    "includeQuery": true,
+    "includeHeader": false
+  }
+}
