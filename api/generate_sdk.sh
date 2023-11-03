@@ -10,3 +10,4 @@ rm -rf sdk/py
 tempyml=$(mktemp)
 npx p2o Plant.id_v3.postman_collection.json -o p2o_options.json >"${tempyml}"
 npx openapi-generator-cli generate -g python -i "${tempyml}" -o sdk/py -c py_conf.json
+rm -f "${tempyml}"
