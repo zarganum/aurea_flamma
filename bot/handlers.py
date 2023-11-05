@@ -133,7 +133,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     job.schedule_removal()
             context.job_queue.run_once(
                 batch_group_job,
-                GALLERY_TIMEOUT,
+                when=GALLERY_TIMEOUT,
                 name=job_name,
                 chat_id=chat_id,
                 user_id=update.effective_user.id,
