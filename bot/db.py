@@ -55,17 +55,18 @@ async def init(client: AsyncIOMotorClient) -> None:
     )
 
 
-async def upsert_user(client: AsyncIOMotorClient, user_id: int) -> None:
+async def upsert_user(client: AsyncIOMotorClient, user: dict) -> None:
+    if not isinstance(user, dict) or "id" not in user or "namespace" not in user:
+        raise ValueError("user dict is required containing namespace and id")
     users = client.get_default_database()["users"]
     now = datetime.now().astimezone(timezone.utc)
     await users.update_one(
-        {"namespace": "tg", "id": user_id},
+        {"namespace": user["namespace"], "id": user["id"]},
         {
             "$setOnInsert": {
-                "namespace": "tg",
-                "id": user_id,
                 "created_at": now,
                 "count": {"identifications": 0},
+                **user,
             },
             "$set": {"updated_at": now},
         },
@@ -74,18 +75,20 @@ async def upsert_user(client: AsyncIOMotorClient, user_id: int) -> None:
 
 
 async def add_identification(
-    client: AsyncIOMotorClient, plant_id: dict
+    client: AsyncIOMotorClient, user: dict, identification: dict
 ) -> Dict[str, Any] | None:
-    if not isinstance(plant_id, dict) or "user_id" not in plant_id:
-        return None
+    if not isinstance(identification, dict):
+        raise ValueError("plant_id must be a dict")
+    await upsert_user(client=client, user=user)
     async with await client.start_session() as session:
         async with session.start_transaction():
-            await client.get_default_database().identifications.insert_one(plant_id)
+            await client.get_default_database().identifications.insert_one(
+                identification
+            )
             await client.get_default_database().users.update_one(
-                {"namespace": "tg", "id": plant_id["user_id"]},
+                {"namespace": user["namespace"], "id": user["id"]},
                 {
                     "$set": {"updated_at": datetime.now().astimezone(timezone.utc)},
                     "$inc": {"count.identifications": 1},
                 },
             )
-            return plant_id

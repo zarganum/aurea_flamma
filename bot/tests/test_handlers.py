@@ -23,11 +23,25 @@ MOCK_PHOTOS = [
     ),
 ]
 
+MOCK_FILES = {
+    "1-22": bytearray(b"1-22"),
+    "1-44": bytearray(b"1-44"),
+    "1-88": bytearray(b"1-88"),
+    "2-22": bytearray(b"2-22"),
+    "2-44": bytearray(b"2-44"),
+    "2-88": bytearray(b"2-88"),
+    "3-22": bytearray(b"3-22"),
+    "3-44": bytearray(b"3-44"),
+    "3-88": bytearray(b"3-88"),
+}
+
 MOCK_CHAT_ID = 1
 MOCK_USER_ID = 1
 MOCK_MEDIA_GROUP_ID = 1
 MOCK_MESSAGE_ID = 1
 MOCK_PLANT_ID = {
+    "namespace": "plant.id",
+    "access_token": "GxRxExAxTxSxHxIxT",
     "result": {
         "classification": {
             "suggestions": [
@@ -45,8 +59,14 @@ MOCK_PLANT_ID = {
                 }
             ]
         }
-    }
+    },
 }
+
+
+async def mock_get_file(file_id: str) -> bytearray:
+    mock = AsyncMock()
+    mock.download_as_bytearray = AsyncMock(return_value=MOCK_FILES[file_id])
+    return mock
 
 
 class TestHandlers(unittest.IsolatedAsyncioTestCase):
@@ -119,22 +139,63 @@ class TestHandlers(unittest.IsolatedAsyncioTestCase):
         )
         job_callback = mock_context.job_queue.run_once.call_args.args[0]
 
-    @patch("bot.handlers.identify_images", new_callable=AsyncMock)
-    async def test40_batch_group_job(self, mock_identify_images: AsyncMock) -> None:
+    @patch("bot.handlers.identify_photos", new_callable=AsyncMock)
+    async def test40_batch_group_job(self, mock_identify_photos: AsyncMock) -> None:
         mock_context = MagicMock()
         mock_context.job.user_id = MOCK_USER_ID
         mock_context.job.chat_id = MOCK_CHAT_ID
         mock_context.job.data = MOCK_MEDIA_GROUP_ID
         mock_context.bot.send_message = AsyncMock()
-        mock_identify_images.return_value = MOCK_PLANT_ID
+        mock_identify_photos.return_value = MOCK_PLANT_ID
         await handlers.batch_group_job(mock_context)
-        mock_identify_images.assert_called_once_with(
+        mock_identify_photos.assert_called_once_with(
             mock_context,
             user_id=MOCK_USER_ID,
+            chat_id=MOCK_CHAT_ID,
+            message_id=MOCK_MESSAGE_ID,
             photos=ANY,
             location=ANY,
-            message_id=MOCK_MESSAGE_ID,
         )
+
+    @patch("bot.handlers.create_identification", new_callable=AsyncMock)
+    @patch("bot.db.add_identification", new_callable=AsyncMock)
+    async def test50_identify_photos(
+        self,
+        mock_db_add_identification: AsyncMock,
+        mock_create_identification: AsyncMock,
+    ):
+        mock_create_identification.return_value = MOCK_PLANT_ID
+        mock_db_add_identification.return_value = None
+        mock_context = MagicMock()
+        mock_context.bot.send_message = AsyncMock()
+        mock_context.bot.get_file = mock_get_file
+        mock_context.bot_data = {"db_client": MagicMock()}
+
+        await handlers.identify_photos(
+            mock_context,
+            user_id=MOCK_USER_ID,
+            chat_id=MOCK_CHAT_ID,
+            message_id=MOCK_MESSAGE_ID,
+            photos=MOCK_PHOTOS,
+            location=Location(1.0, 1.0),
+        )
+
+        mock_create_identification.assert_called_once_with(
+            images=ANY, location=(1.0, 1.0)
+        )
+        mock_db_add_identification.assert_called_once_with(
+            client=ANY,
+            user={"namespace": "tg", "id": MOCK_USER_ID},
+            identification={
+                "reference": {
+                    "namespace": "tg",
+                    "message_id": MOCK_MESSAGE_ID,
+                    "user_id": MOCK_USER_ID,
+                },
+                **MOCK_PLANT_ID,
+            },
+        )
+
         mock_context.bot.send_message.assert_awaited_once_with(
             chat_id=MOCK_CHAT_ID,
             text=ANY,
