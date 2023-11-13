@@ -13,7 +13,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import logging
 
 from . import db
-from .handlers import handle_start, handle_location, handle_photo
+from . import handlers
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -43,10 +43,10 @@ if __name__ == "__main__":
         .build()
     )
 
-    application.add_handler(CommandHandler("start", handle_start))
+    application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(
-        MessageHandler(filters.TEXT | filters.LOCATION, handle_location)
+        MessageHandler(filters.TEXT | filters.LOCATION, handlers.location)
     )
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.PHOTO, handlers.photo))
 
     application.run_polling()

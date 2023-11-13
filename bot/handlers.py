@@ -113,7 +113,7 @@ async def batch_group_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     album_message_ids[context.job.data] = None
 
 
-async def handle_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     user: User = update.message.from_user
     logging.debug(f"from_user:\n{pformat(user, indent=2)}")
 
@@ -136,7 +136,7 @@ async def handle_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def handle_location(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def location(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     global chat_locations
     if update.message.location:
         # Handle location
@@ -162,7 +162,7 @@ async def handle_location(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     #     )
 
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global media_groups
     if update.message.photo:
         logging.debug(f"\nReceived photo:\n{pformat(update.message.photo, indent=2)}\n")
