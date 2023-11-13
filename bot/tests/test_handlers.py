@@ -80,7 +80,7 @@ class TestHandlers(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         mock_update.message.text = "/start"
         mock_update.message.reply_text = AsyncMock()
-        await handlers.handle_start(mock_update, mock_context)
+        await handlers.start(mock_update, mock_context)
         mock_update.message.reply_text.assert_awaited_once_with(
             text=ANY, parse_mode=ANY, reply_markup=ANY
         )
@@ -92,7 +92,7 @@ class TestHandlers(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         mock_update.message.location = Location(1.0, 1.0)
         mock_update.effective_chat.id = 1
-        await handlers.handle_location(mock_update, mock_context)
+        await handlers.location(mock_update, mock_context)
         self.assertDictEqual(handlers.chat_locations, {1: Location(1.0, 1.0)})
 
     @patch("telegram.Update", new_callable=AsyncMock)
@@ -109,7 +109,7 @@ class TestHandlers(unittest.IsolatedAsyncioTestCase):
         mock_update.message.photo = MOCK_PHOTOS[0]
         mock_context.job_queue.run_once = MagicMock()
         mock_context.job_queue.get_jobs_by_name = MagicMock(return_value=[])
-        await handlers.handle_photo(mock_update, mock_context)
+        await handlers.photo(mock_update, mock_context)
         mock_context.job_queue.run_once.assert_called_once_with(
             ANY,
             when=ANY,
@@ -126,7 +126,7 @@ class TestHandlers(unittest.IsolatedAsyncioTestCase):
         mock_update.message.photo = MOCK_PHOTOS[1]
         mock_context.job_queue.run_once = MagicMock()
         mock_context.job_queue.get_jobs_by_name = MagicMock(return_value=[job_obj])
-        await handlers.handle_photo(mock_update, mock_context)
+        await handlers.photo(mock_update, mock_context)
         mock_context.job_queue.get_jobs_by_name.assert_called_once_with(job_name)
         job_obj.schedule_removal.assert_called_once()
         mock_context.job_queue.run_once.assert_called_once_with(
@@ -164,6 +164,7 @@ class TestHandlers(unittest.IsolatedAsyncioTestCase):
         mock_db_add_identification: AsyncMock,
         mock_create_identification: AsyncMock,
     ):
+        self.assertIsInstance(MOCK_PLANT_ID, dict)
         mock_create_identification.return_value = MOCK_PLANT_ID
         mock_db_add_identification.return_value = None
         mock_context = MagicMock()
@@ -188,9 +189,8 @@ class TestHandlers(unittest.IsolatedAsyncioTestCase):
             user={"namespace": "tg", "id": MOCK_USER_ID},
             identification={
                 "reference": {
-                    "namespace": "tg",
-                    "message_id": MOCK_MESSAGE_ID,
-                    "user_id": MOCK_USER_ID,
+                    "user": {"namespace": "tg", "id": MOCK_USER_ID},
+                    "message": {"namespace": "tg", "id": MOCK_MESSAGE_ID},
                 },
                 **MOCK_PLANT_ID,
             },
