@@ -1,6 +1,6 @@
-from typing import Any, Dict
+from typing import Any, Dict, List
 from datetime import datetime, timezone
-from pymongo import IndexModel, ASCENDING, DESCENDING
+from pymongo import IndexModel, ReturnDocument, ASCENDING, DESCENDING
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -17,10 +17,26 @@ async def init(client: AsyncIOMotorClient) -> None:
             IndexModel(
                 [("namespace", ASCENDING), ("access_token", ASCENDING)], unique=True
             ),
-            IndexModel([("user_id", ASCENDING)]),
+            # IndexModel([("user_id", ASCENDING)]),
+            # IndexModel(
+            #     [("reference.message_id", ASCENDING)],
+            #     partialFilterExpression={"reference.message_id": {"$exists": True}},
+            # ),
             IndexModel(
-                [("reference.message_id", ASCENDING)],
-                partialFilterExpression={"reference.message_id": {"$exists": True}},
+                [("reference.user.id", ASCENDING)],
+                partialFilterExpression={"reference.user": {"$exists": True}},
+            ),
+            IndexModel(
+                [("reference.user.namespace", ASCENDING)],
+                partialFilterExpression={"reference.user": {"$exists": True}},
+            ),
+            IndexModel(
+                [("reference.message.id", ASCENDING)],
+                partialFilterExpression={"reference.message": {"$exists": True}},
+            ),
+            IndexModel(
+                [("reference.message.namespace", ASCENDING)],
+                partialFilterExpression={"reference.message": {"$exists": True}},
             ),
             IndexModel([("completed", ASCENDING)]),
             IndexModel([("created", ASCENDING)]),
@@ -92,3 +108,67 @@ async def add_identification(
                     "$inc": {"count.identifications": 1},
                 },
             )
+
+
+async def list_identifications(
+    client: AsyncIOMotorClient, user: dict
+) -> List[Dict[str, Any]] | None:
+    return [
+        doc
+        async for doc in client.get_default_database()
+        .identifications.find(
+            filter={
+                "reference.user.id": user["id"],
+                "reference.user.namespace": user["namespace"],
+            },
+            projection={"_id": False},
+        )
+        .sort("created", ASCENDING)
+    ]
+
+
+async def get_identification(
+    client: AsyncIOMotorClient, user: dict, id: dict
+) -> List[Dict[str, Any]] | None:
+    identification = await client.get_default_database().identifications.find_one(
+        filter={
+            "reference.user.id": user["id"],
+            "reference.user.namespace": user["namespace"],
+            "access_token": id["access_token"],
+            "namespace": id["namespace"],
+        },
+        projection={"_id": False},
+    )
+    return identification if identification else None
+
+
+async def approve_identification(
+    client: AsyncIOMotorClient, user: dict, id: dict, approval: dict
+) -> None:
+    # TODO approval history
+    async with await client.start_session() as session:
+        async with session.start_transaction():
+            identification = await client.get_default_database().identifications.find_one_and_update(
+                filter={
+                    "reference.user.id": user["id"],
+                    "reference.user.namespace": user["namespace"],
+                    "access_token": id["access_token"],
+                    "namespace": id["namespace"],
+                },
+                update={
+                    "$set": {
+                        "result.classification.suggestions.$[approved].approved": {
+                            "updated_at": datetime.now().astimezone(timezone.utc)
+                        }
+                    },
+                    "$unset": {
+                        "result.classification.suggestions.$[unapproved].approved": ""
+                    },
+                },
+                array_filters=[
+                    {"approved.id": approval["id"]},
+                    {"unapproved.id": {"$ne": approval["id"]}},
+                ],
+                return_document=ReturnDocument.AFTER,
+            )
+            return identification if identification else None

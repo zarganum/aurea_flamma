@@ -1,4 +1,4 @@
-from typing import Tuple, Dict
+from typing import Tuple, Dict, List, Any
 
 import base64
 
@@ -16,7 +16,7 @@ from telegram import (
     InlineKeyboardMarkup,
 )
 
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, CallbackContext
 
 from .identify import create_identification
 from . import db
@@ -199,3 +199,112 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 photos=[update.message.photo],
                 location=chat_locations.get(context.job.chat_id, None),
             )
+
+
+def create_message(
+    identification: Dict[str, Any], selected=None
+) -> Tuple[str, List[List[InlineKeyboardButton]]]:
+    keyboard = []
+
+    if selected is None:
+        for i, suggestion in enumerate(
+            identification["result"]["classification"]["suggestions"]
+        ):
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"{round(suggestion['probability']*100)}% {suggestion['name']}"
+                        + (" \u2705" if "approved" in suggestion else ""),
+                        callback_data=f"plant.id:{identification['access_token']}:@{i}",
+                    )
+                ]
+            )
+        text = f"{'Plant probability:'} {round(identification['result']['is_plant']['probability']*100)}%"
+
+    else:
+        suggestion = identification["result"]["classification"]["suggestions"][selected]
+        common_names = []
+        langs = LANGUAGES
+        langs.reverse()
+        for lang in langs:
+            if suggestion["details"]["common_names"][lang]:
+                common_names.extend(suggestion["details"]["common_names"][lang])
+
+        text = (
+            f"*{round(suggestion['probability']*100)}% {suggestion['name']}*\n"
+            + "\n".join([f"\u2022 {cname}" for cname in common_names])
+        )
+
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"{'Approve'}",
+                    callback_data=f"plant.id:{identification['access_token']}:!{selected}",
+                )
+            ]
+        )
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"{'Back'}",
+                    callback_data=f"plant.id:{identification['access_token']}:back",
+                )
+            ]
+        )
+    return (text, keyboard)
+
+
+async def list(update: Update, context: CallbackContext) -> None:
+    identifications = await db.list_identifications(
+        context.bot_data["db_client"],
+        user={"namespace": "tg", "id": update.message.from_user.id},
+    )
+    logging.debug(f"Identifications:\n{pformat(identifications, indent=2)}")
+    for identification in identifications:
+        if identification["namespace"] != "plant.id":
+            continue
+        if (
+            identification["result"]["is_plant"]["probability"]
+            < identification["result"]["is_plant"]["threshold"]
+        ):
+            continue
+        (text, keyboard) = create_message(identification)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            reply_to_message_id=identification["reference"]["message"]["id"],
+            text=text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def button(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    logging.debug(f"Callback query:\n{pformat(query, indent=2)}")
+    await query.answer()
+    (namespace, access_token, action) = query.data.split(":")
+    identification = await db.get_identification(
+        context.bot_data["db_client"],
+        user={"namespace": "tg", "id": update.effective_user.id},
+        id={"namespace": namespace, "access_token": access_token},
+    )
+    logging.debug(f"Identification:\n{pformat(identification, indent=2)}")
+    if identification["namespace"] != "plant.id":
+        return
+    if action == "back":
+        (text, keyboard) = create_message(identification)
+    elif action.startswith("@"):
+        (text, keyboard) = create_message(identification, selected=int(action[1:]))
+    elif action.startswith("!"):
+        suggestion = identification["result"]["classification"]["suggestions"][
+            int(action[1:])
+        ]
+        identification = await db.approve_identification(
+            context.bot_data["db_client"],
+            user={"namespace": "tg", "id": update.effective_user.id},
+            id={"namespace": namespace, "access_token": access_token},
+            approval={"id": suggestion["id"]},
+        )
+        (text, keyboard) = create_message(identification)
+    await query.edit_message_text(
+        text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+    )
